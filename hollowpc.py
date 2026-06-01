@@ -956,8 +956,8 @@ RECOMMENDED_MODELS = [
 
 PWNME_RECOMMENDED_MODELS = [
     ("qwen3:8b", "Best for PWNME — fast, aggressive, follows instructions"),
-    ("qwen3:4b", "Smaller, faster PWNME — less context but quicker"),
-    ("llama3.1:8b", "Good all-rounder for pentesting tasks"),
+    ("glm-5.1:cloud", "Best for reasoning — deep analysis, exploit logic"),
+    ("qwen3:0.6b", "Lightweight & fast — 0.5 GB, good for quick scans"),
 ]
 
 
@@ -968,82 +968,82 @@ def show_model_selector(model):
     """
     local_models = list_local_models() if runtime.ollama_available else []
     installed_names = {m[0] for m in local_models}
+    installed_sizes = {m[0]: m[1] for m in local_models}
 
-    # Build the full list: recommended + installed (no dupes)
-    display_items = []  # (name, desc, installed, is_recommended)
+    # Build items: recommended + installed (no dupes)
+    display_items = []  # (name, desc, installed, is_recommended, size_gb)
 
-    # Section 1: Recommended PWNME models
     for name, desc in PWNME_RECOMMENDED_MODELS:
         is_installed = name in installed_names
-        display_items.append((name, desc, is_installed, True))
+        size = installed_sizes.get(name, 0)
+        display_items.append((name, desc, is_installed, True, size))
 
-    # Section 2: Installed models not already listed
     seen = {name for name, desc in PWNME_RECOMMENDED_MODELS}
     for name, size_gb in local_models:
         if name not in seen:
-            display_items.append((name, f"Installed ({size_gb:.1f} GB)", True, False))
+            display_items.append((name, "", True, False, size_gb))
             seen.add(name)
 
-    # Calculate numbers: 1-3 for recommended, next for installed, last for custom
     total_items = len(display_items) + 1  # +1 for custom input
-    selected = [0]  # Start on first recommended model
+    selected = [0]
 
     if HAS_PT:
         def get_content():
             lines = [("", "\n\n")]
-            lines.append(("bold", "  Select a model\n"))
-            lines.append(("", "\n"))
+            lines.append(("bold", "  Select a model\n\n"))
 
             # Recommended section
-            lines.append(("class:section", "  Recommended for PWNME\n"))
-            for i, (name, desc, installed, is_rec) in enumerate(display_items):
+            lines.append(("class:section", "  ★ Recommended for PWNME\n"))
+            for i, (name, desc, installed, is_rec, size) in enumerate(display_items):
                 if not is_rec:
                     continue
                 if installed:
-                    marker = "[success]✓[/]"
-                    action = "select"
+                    status = ("success", "✓")
                 else:
-                    marker = "[dim]↓[/]"
-                    action = "pull & select"
+                    status = ("dim", "↓")
                 if selected[0] == i:
-                    lines.append(("class:active", f"  > {marker} {name}"))
+                    lines.append(("class:active", f"  > "))
+                    lines.append((status[0], f"{status[1]} "))
+                    lines.append(("class:active", f"{name}"))
+                    lines.append(("class:dim", f"  — {desc}"))
+                    lines.append(("", "\n"))
                 else:
-                    lines.append(("class:dim", f"    {marker} {name}"))
-                lines.append(("class:dim", f"\n        {desc} — {action}\n"))
+                    lines.append(("class:dim", f"    {status[1]} {name}  — {desc}\n"))
 
             # Installed section
-            installed_items = [(i, item) for i, item in enumerate(display_items) if not item[3] and item[2]]
-            if installed_items:
+            inst_items = [(i, item) for i, item in enumerate(display_items) if not item[3] and item[2]]
+            if inst_items:
                 lines.append(("", "\n"))
                 lines.append(("class:section", "  Installed\n"))
-                for i, (name, desc, installed, is_rec) in installed_items:
+                for i, (name, desc, installed, is_rec, size) in inst_items:
+                    size_str = f"  {size:.1f} GB" if size > 0 else ""
                     if selected[0] == i:
-                        lines.append(("class:active", f"  > ✓ {name}"))
+                        lines.append(("class:active", f"  > ✓ {name}{size_str}"))
+                        lines.append(("", "\n"))
                     else:
-                        lines.append(("class:dim", f"    ✓ {name}"))
-                    lines.append(("class:dim", f"\n        {desc}\n"))
+                        lines.append(("class:dim", f"    ✓ {name}{size_str}\n"))
 
             # Custom input
             custom_idx = len(display_items)
             lines.append(("", "\n"))
             lines.append(("class:section", "  Custom model\n"))
             if selected[0] == custom_idx:
-                lines.append(("class:active", "  > Type a model name to pull & use"))
+                lines.append(("class:active", "  > Type model name, Enter to pull & use"))
             else:
-                lines.append(("class:dim", "    Type a model name to pull & use"))
+                lines.append(("class:dim", "    Type model name, Enter to pull & use"))
 
-            lines.append(("", "\n\n  Enter to confirm · Esc to cancel"))
+            lines.append(("", "\n\n  ↑↓ Navigate · Enter confirm · Esc cancel"))
             return FormattedText(lines)
 
         kb = KeyBindings()
 
         @kb.add("up")
         def _(event):
-            selected[0] = (selected[0] - 1) % (total_items)
+            selected[0] = (selected[0] - 1) % total_items
 
         @kb.add("down")
         def _(event):
-            selected[0] = (selected[0] + 1) % (total_items)
+            selected[0] = (selected[0] + 1) % total_items
 
         @kb.add("enter")
         def _(event):
@@ -1060,6 +1060,7 @@ def show_model_selector(model):
             "active": "bold green",
             "dim": "#666666",
             "section": "bold cyan",
+            "success": "green",
         })
         app = Application(layout=layout, key_bindings=kb, style=style, full_screen=True)
         try:
@@ -1072,31 +1073,26 @@ def show_model_selector(model):
 
         chosen_idx = selected[0]
     else:
-        # Fallback without prompt_toolkit
+        # Fallback without prompt_toolkit — plain text
         console.print()
         console.print(Text("  Select a model", style="bold"))
         console.print()
 
-        console.print(Text("  Recommended for PWNME:", style="bold cyan"))
-        idx = 0
-        for i, (name, desc, installed, is_rec) in enumerate(display_items):
+        console.print(Text("  ★ Recommended for PWNME:", style="bold cyan"))
+        for i, (name, desc, installed, is_rec, size) in enumerate(display_items):
             if not is_rec:
                 continue
-            idx = i
-            if installed:
-                console.print(f"  {idx+1}. [success]✓[/] [info.val]{name}[/] — {desc}")
-            else:
-                console.print(f"  {idx+1}. [dim]↓[/] [info.val]{name}[/] — {desc} [dim](pull & select)[/]")
-            idx += 1
+            marker = "[success]✓[/]" if installed else "[dim]↓[/]"
+            action = "select" if installed else "pull & select"
+            console.print(f"  {i+1}. {marker} [info.val]{name}[/]  [dim]— {desc} ({action})[/]")
 
-        installed_items = [(i, item) for i, item in enumerate(display_items) if not item[3] and item[2]]
-        if installed_items:
+        inst_items = [(i, item) for i, item in enumerate(display_items) if not item[3] and item[2]]
+        if inst_items:
             console.print()
             console.print(Text("  Installed:", style="bold cyan"))
-            for i, (name, desc, installed, is_rec) in installed_items:
-                idx = i
-                console.print(f"  {idx+1}. [success]✓[/] [info.val]{name}[/] — {desc}")
-                idx += 1
+            for i, (name, desc, installed, is_rec, size) in inst_items:
+                size_str = f" ({size:.1f} GB)" if size > 0 else ""
+                console.print(f"  {i+1}. [success]✓[/] [info.val]{name}[/][dim]{size_str}[/]")
 
         custom_idx = len(display_items)
         console.print()
@@ -1104,14 +1100,14 @@ def show_model_selector(model):
         console.print()
 
         try:
-            choice = input("  Select [1-{}]: ".format(total_items)).strip()
+            choice = input(f"  Select [1-{total_items}]: ").strip()
             chosen_idx = int(choice) - 1 if choice.isdigit() and 0 <= int(choice) - 1 < total_items else -1
         except (EOFError, KeyboardInterrupt, ValueError):
             return model
 
     # Handle selection
     if chosen_idx == len(display_items):
-        # Custom model — prompt for name
+        # Custom model
         console.print()
         console.print(Text("  Enter model name to pull & use:", style="dim"))
         try:
@@ -1136,16 +1132,14 @@ def show_model_selector(model):
             return custom_name
 
     elif 0 <= chosen_idx < len(display_items):
-        name, desc, installed, is_rec = display_items[chosen_idx]
+        name, desc, installed, is_rec, size = display_items[chosen_idx]
 
         if installed:
-            # Already installed, just select it
             console.print()
             console.print(f"  [success]●[/]  Model set to [info.val]{name}[/]")
             console.print()
             return name
         else:
-            # Need to pull first
             console.print()
             if pull_model(name):
                 console.print(f"  [success]●[/]  Model set to [info.val]{name}[/]")
