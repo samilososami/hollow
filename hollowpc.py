@@ -966,6 +966,37 @@ def pull_model(model_name):
         return False
 
 
+def auto_switch_model(model, new_mode):
+    """When switching mode, auto-switch model to match.
+    - local → pick first installed local model (no :cloud)
+    - cloud/api → pick first :cloud model or default cloud model
+    Returns the new model name.
+    """
+    is_cloud_model = ":cloud" in model
+
+    if new_mode == "local" and is_cloud_model:
+        # Switch from cloud model to a local one
+        local_models = list_local_models()
+        local_only = [name for name, size in local_models if ":cloud" not in name]
+        if local_only:
+            new_model = local_only[0]
+            console.print(f"  [dim]Model: {model} -> {new_model}[/]")
+            return new_model
+        else:
+            # No local models — open selector
+            console.print(f"  [dim]No local models found. Select one:[/]")
+            return show_model_selector(model)
+
+    elif new_mode in ("cloud", "api") and not is_cloud_model:
+        # Switch from local model to a cloud one
+        cloud_default = "minimax-m2.7:cloud"
+        console.print(f"  [dim]Model: {model} -> {cloud_default}[/]")
+        return cloud_default
+
+    # Mode matches model — no change needed
+    return model
+
+
 # Recommended models for PWNME and pentesting
 RECOMMENDED_MODELS = [
     ("qwen3:8b", "8B params, fast reasoning, good for PWNME"),
@@ -2425,9 +2456,12 @@ def handle_command(user_input, model, messages):
             cloud.mode = new_mode
             cloud.save_prefs()
             runtime.refresh()
+            # Auto-switch model to match new mode
+            model = auto_switch_model(model, new_mode)
             console.print()
             console.print(f"  [success]●[/]  Mode: [info.val]{cloud.mode_label()}[/]")
             console.print(f"  [info.key]URL:[/]      [info.val]{cloud.url}[/]")
+            console.print(f"  [info.key]Model:[/]    [info.val]{model}[/]")
             if new_mode == "api":
                 if cloud.api_key:
                     masked = cloud.api_key[:4] + "..." + cloud.api_key[-4:] if len(cloud.api_key) > 8 else "****"
@@ -2444,11 +2478,8 @@ def handle_command(user_input, model, messages):
                     console.print(f"  [success]●[/]  Connection verified.")
                 else:
                     console.print(f"  [warn]●[/]  Connection test failed. Check your API key.")
-
-            # Show model selector for local/cloud modes
-            if new_mode in ("local", "cloud") and runtime.ollama_available:
-                model = show_model_selector(model)
             console.print()
+            return True, model
             return True, model
 
         # Direct API key setting via /ollama-api
@@ -2549,10 +2580,13 @@ def handle_command(user_input, model, messages):
         cloud.mode = chosen
         cloud.save_prefs()
         runtime.refresh()
+        # Auto-switch model to match mode
+        model = auto_switch_model(model, chosen)
 
         console.print()
         console.print(f"  [success]●[/]  Mode: [info.val]{cloud.mode_label()}[/]")
         console.print(f"  [info.key]URL:[/]      [info.val]{cloud.url}[/]")
+        console.print(f"  [info.key]Model:[/]    [info.val]{model}[/]")
 
         if chosen == "api" and not cloud.api_key:
             console.print(f"  [warn]No API key set. Use /ollama-api <key>[/]")
