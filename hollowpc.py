@@ -97,7 +97,7 @@ class CloudConfig:
 
     @property
     def url(self):
-        return "https://ollama.com/api" if self.is_cloud else "http://localhost:11434"
+        return "https://ollama.com" if self.is_cloud else "http://localhost:11434"
 
     def headers(self):
         """Return auth headers for Ollama Cloud, or empty dict for local."""
