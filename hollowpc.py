@@ -990,25 +990,23 @@ def show_model_selector(model):
     if HAS_PT:
         def get_content():
             lines = [("", "\n\n")]
-            lines.append(("bold", "  Select a model\n\n"))
+            lines.append(("class:section", "  Select a model\n"))
+            lines.append(("", "  -------------------------------\n\n"))
 
             # Recommended section
-            lines.append(("class:section", "  ★ Recommended for PWNME\n"))
+            lines.append(("class:section", "  Top picks for PWNME\n"))
             for i, (name, desc, installed, is_rec, size) in enumerate(display_items):
                 if not is_rec:
                     continue
-                if installed:
-                    status = ("success", "✓")
-                else:
-                    status = ("dim", "↓")
+                tag = "INSTALLED" if installed else "PULL"
                 if selected[0] == i:
-                    lines.append(("class:active", f"  > "))
-                    lines.append((status[0], f"{status[1]} "))
-                    lines.append(("class:active", f"{name}"))
-                    lines.append(("class:dim", f"  — {desc}"))
-                    lines.append(("", "\n"))
+                    lines.append(("class:active", f"  > {name}\n"))
+                    lines.append(("class:active", f"    {desc}\n"))
+                    lines.append(("class:dim", f"    [{tag}]\n"))
                 else:
-                    lines.append(("class:dim", f"    {status[1]} {name}  — {desc}\n"))
+                    lines.append(("class:dim", f"    {name}\n"))
+                    lines.append(("class:dim", f"      {desc}\n"))
+                    lines.append(("class:dim", f"      [{tag}]\n"))
 
             # Installed section
             inst_items = [(i, item) for i, item in enumerate(display_items) if not item[3] and item[2]]
@@ -1016,12 +1014,11 @@ def show_model_selector(model):
                 lines.append(("", "\n"))
                 lines.append(("class:section", "  Installed\n"))
                 for i, (name, desc, installed, is_rec, size) in inst_items:
-                    size_str = f"  {size:.1f} GB" if size > 0 else ""
+                    size_str = f" ({size:.1f} GB)" if size > 0 else ""
                     if selected[0] == i:
-                        lines.append(("class:active", f"  > ✓ {name}{size_str}"))
-                        lines.append(("", "\n"))
+                        lines.append(("class:active", f"  > {name}{size_str}\n"))
                     else:
-                        lines.append(("class:dim", f"    ✓ {name}{size_str}\n"))
+                        lines.append(("class:dim", f"    {name}{size_str}\n"))
 
             # Custom input
             custom_idx = len(display_items)
@@ -1032,7 +1029,7 @@ def show_model_selector(model):
             else:
                 lines.append(("class:dim", "    Type model name, Enter to pull & use"))
 
-            lines.append(("", "\n\n  ↑↓ Navigate · Enter confirm · Esc cancel"))
+            lines.append(("", "\n\n  Up/Down: Navigate  Enter: Confirm  Esc: Cancel"))
             return FormattedText(lines)
 
         kb = KeyBindings()
@@ -1058,9 +1055,8 @@ def show_model_selector(model):
         layout = Layout(Window(content=control))
         style = PTStyle.from_dict({
             "active": "bold green",
-            "dim": "#666666",
+            "dim": "#888888",
             "section": "bold cyan",
-            "success": "green",
         })
         app = Application(layout=layout, key_bindings=kb, style=style, full_screen=True)
         try:
@@ -1073,18 +1069,17 @@ def show_model_selector(model):
 
         chosen_idx = selected[0]
     else:
-        # Fallback without prompt_toolkit — plain text
+        # Fallback without prompt_toolkit
         console.print()
         console.print(Text("  Select a model", style="bold"))
         console.print()
 
-        console.print(Text("  ★ Recommended for PWNME:", style="bold cyan"))
+        console.print(Text("  Top picks for PWNME:", style="bold cyan"))
         for i, (name, desc, installed, is_rec, size) in enumerate(display_items):
             if not is_rec:
                 continue
-            marker = "[success]✓[/]" if installed else "[dim]↓[/]"
-            action = "select" if installed else "pull & select"
-            console.print(f"  {i+1}. {marker} [info.val]{name}[/]  [dim]— {desc} ({action})[/]")
+            tag = "INSTALLED" if installed else "PULL"
+            console.print(f"  {i+1}. [info.val]{name}[/]  [dim]{desc} [{tag}][/]")
 
         inst_items = [(i, item) for i, item in enumerate(display_items) if not item[3] and item[2]]
         if inst_items:
@@ -1092,7 +1087,7 @@ def show_model_selector(model):
             console.print(Text("  Installed:", style="bold cyan"))
             for i, (name, desc, installed, is_rec, size) in inst_items:
                 size_str = f" ({size:.1f} GB)" if size > 0 else ""
-                console.print(f"  {i+1}. [success]✓[/] [info.val]{name}[/][dim]{size_str}[/]")
+                console.print(f"  {i+1}. [info.val]{name}[/][dim]{size_str}[/]")
 
         custom_idx = len(display_items)
         console.print()
@@ -1112,9 +1107,9 @@ def show_model_selector(model):
         console.print(Text("  Enter model name to pull & use:", style="dim"))
         try:
             if HAS_PT:
-                custom_name = _session.prompt(FormattedText([("ansigreen bold", "  ❯ ")])).strip()
+                custom_name = _session.prompt(FormattedText([("ansigreen bold", "  > ")])).strip()
             else:
-                custom_name = input("  ❯ ").strip()
+                custom_name = input("  > ").strip()
         except (EOFError, KeyboardInterrupt):
             return model
 
@@ -1123,7 +1118,7 @@ def show_model_selector(model):
 
         console.print()
         if pull_model(custom_name):
-            console.print(f"  [success]●[/]  Model set to [info.val]{custom_name}[/]")
+            console.print(f"  [success]*[/]  Model set to [info.val]{custom_name}[/]")
             console.print()
             return custom_name
         else:
@@ -1136,13 +1131,13 @@ def show_model_selector(model):
 
         if installed:
             console.print()
-            console.print(f"  [success]●[/]  Model set to [info.val]{name}[/]")
+            console.print(f"  [success]*[/]  Model set to [info.val]{name}[/]")
             console.print()
             return name
         else:
             console.print()
             if pull_model(name):
-                console.print(f"  [success]●[/]  Model set to [info.val]{name}[/]")
+                console.print(f"  [success]*[/]  Model set to [info.val]{name}[/]")
                 console.print()
                 return name
             else:
