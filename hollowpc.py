@@ -67,7 +67,7 @@ except ImportError:
 #  Configuration
 # ═══════════════════════════════════════════════════════════════
 
-VERSION        = "0.9.0"
+VERSION        = "0.9.1"
 DEFAULT_MODEL  = "minimax-m2.7:cloud"
 PWNME_MODEL    = "qwen3.5:cloud"
 APP_NAME       = "Hollow"
@@ -87,23 +87,74 @@ EULA_FILE    = Path.home() / ".hollow_eula"
 # ═══════════════════════════════════════════════════════════════
 
 class CloudConfig:
-    """Manages Ollama Cloud API key and connection settings."""
+    """Manages Ollama connection mode and settings.
+
+    Modes:
+        'local'  — Ollama local service (http://localhost:11434, no auth)
+        'cloud'  — Ollama Cloud via binary (http://localhost:11434, ollama signin required)
+        'api'    — Ollama Cloud via API key (https://ollama.com, Bearer auth)
+    """
+    LOCAL_URL = "http://localhost:11434"
+    CLOUD_URL = "http://localhost:11434"  # Same URL, ollama binary proxies cloud models
+    API_URL = "https://ollama.com"
+
     def __init__(self):
+        self.mode = "local"  # 'local', 'cloud', 'api'
         self.api_key = os.environ.get("OLLAMA_API_KEY", "")
+        # If env var is set, default to api mode
+        if self.api_key:
+            self.mode = "api"
+        self._load_prefs()
+
+    def _load_prefs(self):
+        """Load saved preferences from file."""
+        prefs_file = Path.home() / ".hollow_prefs"
+        if prefs_file.exists():
+            try:
+                data = json.loads(prefs_file.read_text())
+                # Only override mode if env var hasn't already set it
+                if not os.environ.get("OLLAMA_API_KEY"):
+                    saved_mode = data.get("mode", "local")
+                    if saved_mode in ("local", "cloud", "api"):
+                        self.mode = saved_mode
+                saved_key = data.get("api_key", "")
+                if saved_key and not self.api_key:
+                    self.api_key = saved_key
+            except Exception:
+                pass
+
+    def save_prefs(self):
+        """Save current preferences to file."""
+        prefs_file = Path.home() / ".hollow_prefs"
+        try:
+            data = {"mode": self.mode, "api_key": self.api_key}
+            prefs_file.write_text(json.dumps(data, indent=2))
+        except Exception:
+            pass
 
     @property
     def is_cloud(self):
-        return bool(self.api_key)
+        return self.mode in ("cloud", "api")
 
     @property
     def url(self):
-        return "https://ollama.com" if self.is_cloud else "http://localhost:11434"
+        if self.mode == "api":
+            return self.API_URL
+        return self.LOCAL_URL  # both local and cloud use localhost
 
     def headers(self):
-        """Return auth headers for Ollama Cloud, or empty dict for local."""
-        if self.is_cloud:
+        """Return auth headers. Only api mode uses Bearer token."""
+        if self.mode == "api":
             return {"Authorization": f"Bearer {self.api_key}"}
         return {}
+
+    def mode_label(self):
+        """Human-readable mode label."""
+        return {"local": "Ollama Local", "cloud": "Ollama Cloud", "api": "Ollama API"}.get(self.mode, "Unknown")
+
+    def requires_local(self):
+        """Whether this mode requires a local ollama installation."""
+        return self.mode in ("local", "cloud")
 
 
 class RuntimeState:
@@ -113,10 +164,13 @@ class RuntimeState:
         self.is_windows = False
         self.os_context = ""
         self.active_system_prompt = ""
+        self.session_start = time.time()  # For cumulative thinking timer
 
     @property
     def can_chat(self):
-        return self.ollama_available or cloud.is_cloud
+        if cloud.mode == "api":
+            return True  # API mode doesn't need local ollama
+        return self.ollama_available
 
     def refresh(self):
         """Re-check if local Ollama is available after config changes."""
@@ -663,7 +717,7 @@ COMMAND_LIST = [
     "/help", "/model", "/skip-permissions", "/skip",
     "/search", "/pwnme", "/clearscreen",
     "/clear", "/status", "/auth", "/info", "/exit", "/quit",
-    "/ollama-api",
+    "/ollama-api", "/ollama-mode",
 ]
 
 if HAS_PT:
@@ -800,7 +854,9 @@ def show_banner():
     console.print(Rule(style="border.dim", characters="─"))
 
 
-def show_status(model, is_root, connection="local"):
+def show_status(model, is_root, connection=None):
+    if connection is None:
+        connection = cloud.mode
     table = Table(show_header=False, box=None, padding=(0, 2), expand=False)
     table.add_column(style="info.key", no_wrap=True)
     table.add_column()
@@ -811,10 +867,10 @@ def show_status(model, is_root, connection="local"):
         priv.append("● ", style="warn"); priv.append("user", style="warn")
     table.add_row("Privileges", priv)
     table.add_row("Model", Text(model, style="info.val"))
-    if connection == "cloud":
-        conn_text = Text.assemble(("● ", "success"), ("Ollama Cloud", "info.val"))
-    else:
-        conn_text = Text.assemble(("● ", "success"), ("Local Ollama", "info.val"))
+    # Connection label based on mode
+    conn_labels = {"local": "Ollama Local", "cloud": "Ollama Cloud", "api": "Ollama API"}
+    conn_label = conn_labels.get(connection, "Unknown")
+    conn_text = Text.assemble(("● ", "success"), (conn_label, "info.val"))
     table.add_row("Connection", conn_text)
     table.add_row("Version", Text(f"v{VERSION}", style="info.val"))
     creator_text = Text.assemble(
@@ -845,6 +901,64 @@ def check_local_ollama():
         return r.status_code == 200
     except Exception:
         return False
+
+
+def list_local_models():
+    """List locally installed Ollama models. Returns list of (name, size) tuples."""
+    try:
+        r = httpx.get("http://localhost:11434/api/tags", timeout=5.0)
+        if r.status_code == 200:
+            data = r.json()
+            models = []
+            for m in data.get("models", []):
+                name = m.get("name", "unknown")
+                size = m.get("size", 0)
+                # Convert bytes to GB
+                size_gb = size / (1024**3) if size else 0
+                models.append((name, size_gb))
+            return models
+    except Exception:
+        pass
+    return []
+
+
+def pull_model(model_name):
+    """Pull a model from Ollama registry. Returns True on success."""
+    try:
+        console.print(f"  [info.key]Pulling[/] [info.val]{model_name}[/]...")
+        with httpx.stream("POST", "http://localhost:11434/api/pull",
+                          json={"name": model_name, "stream": True},
+                          timeout=httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0)) as resp:
+            for line in resp.iter_lines():
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                    status = data.get("status", "")
+                    if "success" in status.lower():
+                        console.print(f"  [success]●[/] {model_name} pulled successfully.")
+                        return True
+                except json.JSONDecodeError:
+                    continue
+        console.print(f"  [warn]Pull completed for {model_name}.[/]")
+        return True
+    except Exception as e:
+        console.print(f"  [err]Failed to pull {model_name}: {e}[/]")
+        return False
+
+
+# Recommended models for PWNME and pentesting
+RECOMMENDED_MODELS = [
+    ("qwen3:8b", "8B params, fast reasoning, good for PWNME"),
+    ("llama3.1:8b", "8B params, balanced performance"),
+    ("mistral:7b", "7B params, lightweight and fast"),
+]
+
+PWNME_RECOMMENDED_MODELS = [
+    ("qwen3:8b", "Best for PWNME — fast, aggressive, follows instructions"),
+    ("qwen3:4b", "Smaller, faster PWNME — less context but quicker"),
+    ("llama3.1:8b", "Good all-rounder for pentesting tasks"),
+]
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -958,11 +1072,30 @@ def show_pwnme_info(animated=True):
     if runtime.is_windows:
         username = os.getenv("USERNAME", "unknown")
         hostname = socket.gethostname()
+        os_version = os.getenv("OS", "Unknown")
         try:
             import ctypes
             is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
         except Exception:
             is_admin = False
+        # Try to get groups
+        groups_str = ""
+        try:
+            result = subprocess.run(
+                ["net", "localgroup", "users"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                # Parse group membership
+                groups = []
+                for line in result.stdout.strip().split("\n"):
+                    line = line.strip()
+                    if line and not line.startswith("*") and line != "The command completed successfully." and "Alias name" not in line and "Comment" not in line and "Members" not in line and "-----" not in line:
+                        groups.append(line)
+                if groups:
+                    groups_str = ", ".join(groups[:8]) + ("..." if len(groups) > 8 else "")
+        except Exception:
+            pass
         console.print()
         console.print(Text("  Target", style="bold color(34)"))
         if animated:
@@ -970,11 +1103,15 @@ def show_pwnme_info(animated=True):
         console.print(Text("  " + "─" * 40, style="color(22)"))
         if animated:
             time.sleep(0.04)
-        for label, value in [
+        info_rows = [
             ("User", username),
             ("Admin", "Yes" if is_admin else "No"),
-            ("Host", hostname),
-        ]:
+        ]
+        if groups_str:
+            info_rows.append(("Groups", groups_str))
+        info_rows.append(("OS", os_version))
+        info_rows.append(("Host", hostname))
+        for label, value in info_rows:
             console.print(f"  [color(28)]▸[/] [info.key]{label:8s}[/] [white]{value}[/]")
             if animated:
                 time.sleep(0.04)
@@ -1270,6 +1407,7 @@ def pwnme_mode(model, skip_anim=False):
 
     pwnme_active = True
     pwnme_cancel.clear()
+    runtime.session_start = time.time()  # Reset cumulative timer for PWNME
 
     # Select system prompt based on OS
     import socket
@@ -1724,7 +1862,7 @@ def stream_chat(model, messages, compact=False, raise_on_interrupt=False, cancel
                           Returns None if the model never produced visible content.
     """
     if not runtime.can_chat:
-        console.print("[err]No Ollama connection.[/] Start ollama serve or set a cloud API key with /ollama-api.")
+        console.print("[err]No Ollama connection.[/] Start ollama serve or use /ollama-mode to switch.")
         return None
 
     url = f"{cloud.url}/api/chat"
@@ -1733,13 +1871,15 @@ def stream_chat(model, messages, compact=False, raise_on_interrupt=False, cancel
     full_response = ""
     has_visible = False
     start_time = time.time()
+    # Cumulative time: show total session thinking time, not per-call
+    session_elapsed = start_time - runtime.session_start
     stop_timer = threading.Event()
     thinking_expired = threading.Event()  # Set when thinking timeout fires
 
     def timer_updater(live):
         spin_idx = 0
         while not stop_timer.is_set():
-            elapsed = time.time() - start_time
+            elapsed = time.time() - runtime.session_start
             frame = SPINNER_FRAMES[spin_idx % len(SPINNER_FRAMES)]
             live.update(Text(f" {frame} thinking {elapsed:.0f}s", style="dim"))
             spin_idx += 1
@@ -1879,7 +2019,8 @@ COMMANDS_HELP = {
     "/status":          "Show context token usage",
     "/auth":            "Authenticate as the creator",
     "/info":            "Show system information",
-    "/ollama-api [key]": "Show or set Ollama Cloud API key",
+    "/ollama-mode":     "Switch Ollama mode (local/cloud/api)",
+    "/ollama-api [key]": "Set Ollama Cloud API key (shortcut for api mode)",
     "/exit":            "Exit Hollow",
 }
 
@@ -1920,7 +2061,8 @@ def handle_command(user_input, model, messages):
                 "/search <query>": "Search the web",
             }),
             ("Connection", "blue", {
-                "/ollama-api [key]": "Show or set Ollama Cloud API key",
+                "/ollama-mode": "Switch Ollama mode (local/cloud/api)",
+                "/ollama-api [key]": "Set API key (shortcut for api mode)",
             }),
             ("Auth", "magenta", {
                 "/auth": "Authenticate as the creator",
@@ -1970,8 +2112,7 @@ def handle_command(user_input, model, messages):
 
     if cmd == "/info":
         is_root = False if runtime.is_windows else os.geteuid() == 0
-        conn_mode = "cloud" if cloud.is_cloud else "local"
-        show_status(model, is_root, connection=conn_mode)
+        show_status(model, is_root, connection=cloud.mode)
         label, style = perms.status_str()
         console.print(f"  Permissions: [{style}]{label}[/]")
         if perms.always_allow:
@@ -2039,41 +2180,190 @@ def handle_command(user_input, model, messages):
             console.print()
         return True, model
 
-    if cmd == "/ollama-api":
-        if len(parts) > 1:
-            key = parts[1].strip()
-            if key.lower() in ("clear", "reset", "none", ""):
+    if cmd in ("/ollama-mode", "/ollama-api"):
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        # Direct mode selection via argument
+        if arg.lower() in ("local", "cloud", "api"):
+            new_mode = arg.lower()
+            cloud.mode = new_mode
+            cloud.save_prefs()
+            runtime.refresh()
+            console.print()
+            console.print(f"  [success]●[/]  Mode: [info.val]{cloud.mode_label()}[/]")
+            console.print(f"  [info.key]URL:[/]      [info.val]{cloud.url}[/]")
+            if new_mode == "api":
+                if cloud.api_key:
+                    masked = cloud.api_key[:4] + "..." + cloud.api_key[-4:] if len(cloud.api_key) > 8 else "****"
+                    console.print(f"  [info.key]API Key:[/]  [info.val]{masked}[/]")
+                else:
+                    console.print(f"  [warn]No API key set. Use /ollama-api <key>[/]")
+            if cloud.requires_local() and not runtime.ollama_available:
+                console.print(f"  [warn]●[/]  Ollama not detected. Start with: [info.key]ollama serve[/]")
+            elif cloud.requires_local():
+                console.print(f"  [success]●[/]  Local Ollama detected.")
+            elif new_mode == "api":
+                ok, _ = check_ollama()
+                if ok:
+                    console.print(f"  [success]●[/]  Connection verified.")
+                else:
+                    console.print(f"  [warn]●[/]  Connection test failed. Check your API key.")
+            console.print()
+            return True, model
+
+        # Direct API key setting via /ollama-api
+        if cmd == "/ollama-api" and arg and arg.lower() not in ("local", "cloud", "api"):
+            key = arg
+            if key.lower() in ("clear", "reset", "none"):
                 cloud.api_key = ""
+                cloud.mode = "local"
+                cloud.save_prefs()
                 runtime.refresh()
-                console.print(f"  [dim]API key cleared. Using local Ollama.[/]")
-                console.print(f"  [dim]URL: {cloud.url}[/]")
+                console.print()
+                console.print(f"  [dim]API key cleared. Switched to {cloud.mode_label()}.[/]")
+                console.print()
+                return True, model
             else:
                 cloud.api_key = key
+                cloud.mode = "api"
+                cloud.save_prefs()
                 runtime.refresh()
-                if runtime.can_chat:
-                    ok, _ = check_ollama()
-                    if ok:
-                        console.print(f"  [success]●[/]  Ollama Cloud API key set.")
-                        console.print(f"  [success]●[/]  Connection verified.")
-                        console.print(f"  [dim]URL: {cloud.url}[/]")
-                    else:
-                        console.print(f"  [warn]●[/]  Key set, but connection test failed. Check your API key.")
-                        console.print(f"  [dim]URL: {cloud.url}[/]")
+                ok, _ = check_ollama()
+                console.print()
+                if ok:
+                    console.print(f"  [success]●[/]  API key set. Mode: [info.val]{cloud.mode_label()}[/]")
+                    console.print(f"  [success]●[/]  Connection verified.")
                 else:
-                    console.print(f"  [warn]●[/]  Key set, but no backend available.")
-                    console.print(f"  [dim]URL: {cloud.url}[/]")
+                    console.print(f"  [success]●[/]  API key set. Mode: [info.val]{cloud.mode_label()}[/]")
+                    console.print(f"  [warn]●[/]  Connection test failed. Check your API key.")
+                console.print()
+                return True, model
+
+        # Interactive mode selector
+        console.print()
+        console.print(Text("  Ollama Mode", style="bold"))
+        console.print(Text("  " + "─" * 30, style="border.dim"))
+
+        modes = [
+            ("local", "Ollama Local", "Local Ollama service (requires ollama serve)"),
+            ("cloud", "Ollama Cloud", "Cloud models via ollama binary (requires ollama signin)"),
+            ("api", "Ollama API", "Cloud via API key (no local install needed)"),
+        ]
+        current_idx = ["local", "cloud", "api"].index(cloud.mode)
+
+        if HAS_PT:
+            selected = [current_idx]
+
+            def get_mode_content():
+                lines = [("", "\n\n")]
+                for i, (mode_id, label, desc) in enumerate(modes):
+                    if selected[0] == i:
+                        lines.append(("class:active", f"  > {label}"))
+                    else:
+                        lines.append(("class:dim", f"    {label}"))
+                    lines.append(("class:dim", f"\n      {desc}\n"))
+                lines.append(("", "\n  Enter to confirm, Esc to cancel\n"))
+                return FormattedText(lines)
+
+            kb = KeyBindings()
+            @kb.add("up")
+            def _(event):
+                selected[0] = (selected[0] - 1) % 3
+            @kb.add("down")
+            def _(event):
+                selected[0] = (selected[0] + 1) % 3
+            @kb.add("enter")
+            def _(event):
+                event.app.exit()
+            @kb.add("escape")
+            def _(event):
+                selected[0] = -1  # Cancel
+                event.app.exit()
+
+            control = FormattedTextControl(get_mode_content)
+            layout = Layout(Window(content=control))
+            style = PTStyle.from_dict({"active": "bold green", "dim": "#666666"})
+            app = Application(layout=layout, key_bindings=kb, style=style, full_screen=True)
+            try:
+                app.run()
+            except (EOFError, KeyboardInterrupt):
+                selected[0] = -1
+
+            if selected[0] == -1:
+                console.print("  [dim]Cancelled.[/]")
+                console.print()
+                return True, model
+            chosen = modes[selected[0]][0]
         else:
-            # Show current config
-            if cloud.is_cloud:
-                masked = cloud.api_key[:4] + "..." + cloud.api_key[-4:] if len(cloud.api_key) > 8 else "****"
-                console.print(f"  [info.key]Mode:[/]     [info.val]Ollama Cloud[/]")
-                console.print(f"  [info.key]URL:[/]      [info.val]{cloud.url}[/]")
-                console.print(f"  [info.key]API Key:[/]  [info.val]{masked}[/]")
+            # Fallback without prompt_toolkit
+            for i, (mode_id, label, desc) in enumerate(modes):
+                marker = "▶" if i == current_idx else " "
+                console.print(f"  {marker} {i+1}. [info.key]{label}[/] — [dim]{desc}[/]")
+            console.print()
+            try:
+                choice = input("  Select mode [1-3]: ").strip()
+                chosen = {"1": "local", "2": "cloud", "3": "api"}.get(choice, cloud.mode)
+            except (EOFError, KeyboardInterrupt):
+                chosen = cloud.mode
+
+        cloud.mode = chosen
+        cloud.save_prefs()
+        runtime.refresh()
+
+        console.print()
+        console.print(f"  [success]●[/]  Mode: [info.val]{cloud.mode_label()}[/]")
+        console.print(f"  [info.key]URL:[/]      [info.val]{cloud.url}[/]")
+
+        if chosen == "api" and not cloud.api_key:
+            console.print(f"  [warn]No API key set. Use /ollama-api <key>[/]")
+        elif chosen == "api" and cloud.api_key:
+            masked = cloud.api_key[:4] + "..." + cloud.api_key[-4:] if len(cloud.api_key) > 8 else "****"
+            console.print(f"  [info.key]API Key:[/]  [info.val]{masked}[/]")
+
+        if cloud.requires_local():
+            if runtime.ollama_available:
+                console.print(f"  [success]●[/]  Local Ollama detected.")
+                # Show installed models in local/cloud mode
+                local_models = list_local_models()
+                if local_models:
+                    console.print()
+                    console.print(Text("  Installed models:", style="info.key"))
+                    for name, size_gb in local_models:
+                        console.print(f"    [info.val]{name}[/]  [dim]({size_gb:.1f} GB)[/]")
             else:
-                console.print(f"  [info.key]Mode:[/]     [info.val]Local Ollama[/]")
-                console.print(f"  [info.key]URL:[/]      [info.val]{cloud.url}[/]")
-                console.print(f"  [dim]Set a key with: /ollama-api <key>[/]")
-                console.print(f"  [dim]Or use: --ollama-api <key> at startup[/]")
+                console.print(f"  [warn]●[/]  Ollama not detected. Start with: [info.key]ollama serve[/]")
+
+        # Show recommended models for pentesting/PWNME
+        if chosen in ("local", "cloud"):
+            console.print()
+            console.print(Text("  Recommended for PWNME:", style="color(46)"))
+            for name, desc in PWNME_RECOMMENDED_MODELS:
+                installed = any(name.split(":")[0] in m[0] for m in list_local_models()) if runtime.ollama_available else False
+                marker = "[success]✓[/]" if installed else "[dim]○[/]"
+                console.print(f"    {marker} [info.val]{name}[/] — [dim]{desc}[/]")
+            console.print()
+            console.print(Text("  Type a model name to pull (or press Enter to skip):", style="dim"))
+            try:
+                if HAS_PT:
+                    pull_input = _session.prompt(FormattedText([("ansigreen bold", "  ❯ ")])).strip()
+                else:
+                    pull_input = input("  ❯ ").strip()
+            except (EOFError, KeyboardInterrupt):
+                pull_input = ""
+
+            if pull_input:
+                console.print()
+                pull_model(pull_input)
+                # Refresh model list after pull
+                runtime.refresh()
+
+        elif chosen == "api":
+            ok, _ = check_ollama()
+            if ok:
+                console.print(f"  [success]●[/]  Connection verified.")
+            else:
+                console.print(f"  [warn]●[/]  Connection test failed. Check your API key.")
+
         console.print()
         return True, model
 
@@ -2123,7 +2413,7 @@ def chat_loop(model):
                 console.print(Panel(
                     "[err]Ollama is not running or not installed.[/]\n\n"
                     "Start it with: [info.key]ollama serve[/]\n"
-                    "Or set a cloud API key: [info.key]/ollama-api <key>[/]",
+                    "Or switch mode: [info.key]/ollama-mode[/]",
                     title="[err]Connection Error[/]", border_style="err", padding=(1, 2),
                 ))
                 console.print()
@@ -2258,6 +2548,8 @@ def main():
     # Resolve API key: CLI flag > env var (env var already read in CloudConfig.__init__)
     if args.ollama_api:
         cloud.api_key = args.ollama_api
+        cloud.mode = "api"
+        cloud.save_prefs()
 
     # Apply --skip-permissions flag
     if args.skip_permissions:
@@ -2296,8 +2588,7 @@ def main():
     show_banner()
 
     # Connection mode for status display
-    conn_mode = "cloud" if cloud.is_cloud else "local"
-    show_status(model, is_root, connection=conn_mode)
+    show_status(model, is_root, connection=cloud.mode)
 
     console.print()
 
@@ -2305,34 +2596,54 @@ def main():
     local_ok = check_local_ollama()
     runtime.ollama_available = local_ok
 
-    if cloud.is_cloud:
-        # Cloud mode: verify cloud connection
+    if cloud.mode == "api":
+        # API mode: verify cloud connection, local not required
         ok, _ = check_ollama()
         if ok:
-            console.print(f"  [success]●[/]  Ollama Cloud active — model [info.val]{model}[/] ready.")
-            if local_ok:
-                console.print(f"  [dim]Local Ollama also available at localhost:11434[/]")
+            console.print(f"  [success]●[/]  Ollama API active — model [info.val]{model}[/] ready.")
         else:
-            console.print(f"  [warn]●[/]  Cloud API key set but connection failed. Check your key.")
+            console.print(f"  [warn]●[/]  API key set but connection failed. Check your key.")
             console.print(f"  [dim]Use /ollama-api to update your key.[/]")
-    elif local_ok:
-        ok, models_data = check_ollama()
-        if ok:
-            console.print(f"  [success]●[/]  Ollama connected — model [info.val]{model}[/] ready.")
+    elif cloud.mode == "cloud":
+        # Cloud mode: needs local ollama binary running + signed in
+        if local_ok:
+            ok, _ = check_ollama()
+            if ok:
+                console.print(f"  [success]●[/]  Ollama Cloud active — model [info.val]{model}[/] ready.")
+            else:
+                console.print(f"  [warn]●[/]  Ollama running but returned an error.")
+                console.print(f"  [dim]Make sure you are signed in: [info.key]ollama signin[/]")
         else:
-            console.print(f"  [warn]●[/]  Ollama running but returned an error.")
+            console.print(Panel(
+                "[err]Ollama is not running.[/]\n\n"
+                "Cloud mode requires the Ollama binary running:\n"
+                f"  [info.key]$[/] ollama serve\n\n"
+                "Then sign in:\n"
+                f"  [info.key]$[/] ollama signin\n\n"
+                "Or switch to API mode:\n"
+                f"  [info.key]/ollama-mode api[/]",
+                title="[err]Connection Error[/]", border_style="err", padding=(1, 2),
+            ))
     else:
-        # Neither local nor cloud: show error but don't exit
-        console.print(Panel(
-            "[err]Ollama is not running or not installed.[/]\n\n"
-            "Start it with:\n"
-            f"  [info.key]$[/] ollama serve\n\n"
-            "Or set a cloud API key to use Ollama Cloud:\n"
-            f"  [info.key]$[/] hollow --ollama-api <key>\n"
-            f"  [info.key]/ollama-api <key>[/]  (inside Hollow)\n\n"
-            f"Get a key at: [dim]https://ollama.com/settings/keys[/]",
-            title="[err]Connection Error[/]", border_style="err", padding=(1, 2),
-        ))
+        # Local mode: needs ollama running
+        if local_ok:
+            ok, models_data = check_ollama()
+            if ok:
+                console.print(f"  [success]●[/]  Ollama Local connected — model [info.val]{model}[/] ready.")
+            else:
+                console.print(f"  [warn]●[/]  Ollama running but returned an error.")
+        else:
+            # No local, no cloud: show error with options
+            console.print(Panel(
+                "[err]Ollama is not running or not installed.[/]\n\n"
+                "Start it with:\n"
+                f"  [info.key]$[/] ollama serve\n\n"
+                "Or switch to cloud mode:\n"
+                f"  [info.key]/ollama-mode cloud[/]  (requires ollama signin)\n"
+                f"  [info.key]/ollama-mode api[/]    (no install needed, API key)\n\n"
+                f"Get an API key at: [dim]https://ollama.com/settings/keys[/]",
+                title="[err]Connection Error[/]", border_style="err", padding=(1, 2),
+            ))
 
     console.print()
     console.print(Rule(style="border.dim", characters="─"))
