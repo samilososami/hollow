@@ -978,7 +978,7 @@ def show_model_selector(model):
         display_items.append((name, desc, is_installed, True))
 
     # Section 2: Installed models not already listed
-    seen = {name for name, _, _ in PWNME_RECOMMENDED_MODELS}
+    seen = {name for name, desc in PWNME_RECOMMENDED_MODELS}
     for name, size_gb in local_models:
         if name not in seen:
             display_items.append((name, f"Installed ({size_gb:.1f} GB)", True, False))
