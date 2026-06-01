@@ -961,6 +961,204 @@ PWNME_RECOMMENDED_MODELS = [
 ]
 
 
+def show_model_selector(model):
+    """Interactive model selector after choosing local/cloud mode.
+    Shows: recommended models (install+select), installed models (select), custom input.
+    Returns the selected model name, or the original model if cancelled.
+    """
+    local_models = list_local_models() if runtime.ollama_available else []
+    installed_names = {m[0] for m in local_models}
+
+    # Build the full list: recommended + installed (no dupes)
+    display_items = []  # (name, desc, installed, is_recommended)
+
+    # Section 1: Recommended PWNME models
+    for name, desc in PWNME_RECOMMENDED_MODELS:
+        is_installed = name in installed_names
+        display_items.append((name, desc, is_installed, True))
+
+    # Section 2: Installed models not already listed
+    seen = {name for name, _, _ in PWNME_RECOMMENDED_MODELS}
+    for name, size_gb in local_models:
+        if name not in seen:
+            display_items.append((name, f"Installed ({size_gb:.1f} GB)", True, False))
+            seen.add(name)
+
+    # Calculate numbers: 1-3 for recommended, next for installed, last for custom
+    total_items = len(display_items) + 1  # +1 for custom input
+    selected = [0]  # Start on first recommended model
+
+    if HAS_PT:
+        def get_content():
+            lines = [("", "\n\n")]
+            lines.append(("bold", "  Select a model\n"))
+            lines.append(("", "\n"))
+
+            # Recommended section
+            lines.append(("class:section", "  Recommended for PWNME\n"))
+            for i, (name, desc, installed, is_rec) in enumerate(display_items):
+                if not is_rec:
+                    continue
+                if installed:
+                    marker = "[success]✓[/]"
+                    action = "select"
+                else:
+                    marker = "[dim]↓[/]"
+                    action = "pull & select"
+                if selected[0] == i:
+                    lines.append(("class:active", f"  > {marker} {name}"))
+                else:
+                    lines.append(("class:dim", f"    {marker} {name}"))
+                lines.append(("class:dim", f"\n        {desc} — {action}\n"))
+
+            # Installed section
+            installed_items = [(i, item) for i, item in enumerate(display_items) if not item[3] and item[2]]
+            if installed_items:
+                lines.append(("", "\n"))
+                lines.append(("class:section", "  Installed\n"))
+                for i, (name, desc, installed, is_rec) in installed_items:
+                    if selected[0] == i:
+                        lines.append(("class:active", f"  > ✓ {name}"))
+                    else:
+                        lines.append(("class:dim", f"    ✓ {name}"))
+                    lines.append(("class:dim", f"\n        {desc}\n"))
+
+            # Custom input
+            custom_idx = len(display_items)
+            lines.append(("", "\n"))
+            lines.append(("class:section", "  Custom model\n"))
+            if selected[0] == custom_idx:
+                lines.append(("class:active", "  > Type a model name to pull & use"))
+            else:
+                lines.append(("class:dim", "    Type a model name to pull & use"))
+
+            lines.append(("", "\n\n  Enter to confirm · Esc to cancel"))
+            return FormattedText(lines)
+
+        kb = KeyBindings()
+
+        @kb.add("up")
+        def _(event):
+            selected[0] = (selected[0] - 1) % (total_items)
+
+        @kb.add("down")
+        def _(event):
+            selected[0] = (selected[0] + 1) % (total_items)
+
+        @kb.add("enter")
+        def _(event):
+            event.app.exit()
+
+        @kb.add("escape")
+        def _(event):
+            selected[0] = -1
+            event.app.exit()
+
+        control = FormattedTextControl(get_content)
+        layout = Layout(Window(content=control))
+        style = PTStyle.from_dict({
+            "active": "bold green",
+            "dim": "#666666",
+            "section": "bold cyan",
+        })
+        app = Application(layout=layout, key_bindings=kb, style=style, full_screen=True)
+        try:
+            app.run()
+        except (EOFError, KeyboardInterrupt):
+            selected[0] = -1
+
+        if selected[0] == -1:
+            return model  # Cancelled
+
+        chosen_idx = selected[0]
+    else:
+        # Fallback without prompt_toolkit
+        console.print()
+        console.print(Text("  Select a model", style="bold"))
+        console.print()
+
+        console.print(Text("  Recommended for PWNME:", style="bold cyan"))
+        idx = 0
+        for i, (name, desc, installed, is_rec) in enumerate(display_items):
+            if not is_rec:
+                continue
+            idx = i
+            if installed:
+                console.print(f"  {idx+1}. [success]✓[/] [info.val]{name}[/] — {desc}")
+            else:
+                console.print(f"  {idx+1}. [dim]↓[/] [info.val]{name}[/] — {desc} [dim](pull & select)[/]")
+            idx += 1
+
+        installed_items = [(i, item) for i, item in enumerate(display_items) if not item[3] and item[2]]
+        if installed_items:
+            console.print()
+            console.print(Text("  Installed:", style="bold cyan"))
+            for i, (name, desc, installed, is_rec) in installed_items:
+                idx = i
+                console.print(f"  {idx+1}. [success]✓[/] [info.val]{name}[/] — {desc}")
+                idx += 1
+
+        custom_idx = len(display_items)
+        console.print()
+        console.print(f"  {custom_idx+1}. [dim]Custom model (pull & use)[/]")
+        console.print()
+
+        try:
+            choice = input("  Select [1-{}]: ".format(total_items)).strip()
+            chosen_idx = int(choice) - 1 if choice.isdigit() and 0 <= int(choice) - 1 < total_items else -1
+        except (EOFError, KeyboardInterrupt, ValueError):
+            return model
+
+    # Handle selection
+    if chosen_idx == len(display_items):
+        # Custom model — prompt for name
+        console.print()
+        console.print(Text("  Enter model name to pull & use:", style="dim"))
+        try:
+            if HAS_PT:
+                custom_name = _session.prompt(FormattedText([("ansigreen bold", "  ❯ ")])).strip()
+            else:
+                custom_name = input("  ❯ ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return model
+
+        if not custom_name:
+            return model
+
+        console.print()
+        if pull_model(custom_name):
+            console.print(f"  [success]●[/]  Model set to [info.val]{custom_name}[/]")
+            console.print()
+            return custom_name
+        else:
+            console.print(f"  [warn]Pull failed. Model set to [info.val]{custom_name}[/] anyway.")
+            console.print()
+            return custom_name
+
+    elif 0 <= chosen_idx < len(display_items):
+        name, desc, installed, is_rec = display_items[chosen_idx]
+
+        if installed:
+            # Already installed, just select it
+            console.print()
+            console.print(f"  [success]●[/]  Model set to [info.val]{name}[/]")
+            console.print()
+            return name
+        else:
+            # Need to pull first
+            console.print()
+            if pull_model(name):
+                console.print(f"  [success]●[/]  Model set to [info.val]{name}[/]")
+                console.print()
+                return name
+            else:
+                console.print(f"  [warn]Pull failed. Model set to [info.val]{name}[/] anyway.")
+                console.print()
+                return name
+
+    return model
+
+
 # ═══════════════════════════════════════════════════════════════
 #  Web Search
 # ═══════════════════════════════════════════════════════════════
@@ -2208,6 +2406,10 @@ def handle_command(user_input, model, messages):
                     console.print(f"  [success]●[/]  Connection verified.")
                 else:
                     console.print(f"  [warn]●[/]  Connection test failed. Check your API key.")
+
+            # Show model selector for local/cloud modes
+            if new_mode in ("local", "cloud") and runtime.ollama_available:
+                model = show_model_selector(model)
             console.print()
             return True, model
 
@@ -2262,7 +2464,7 @@ def handle_command(user_input, model, messages):
                     else:
                         lines.append(("class:dim", f"    {label}"))
                     lines.append(("class:dim", f"\n      {desc}\n"))
-                lines.append(("", "\n  Enter to confirm, Esc to cancel\n"))
+                lines.append(("", "\n  Enter to confirm · Esc to cancel\n"))
                 return FormattedText(lines)
 
             kb = KeyBindings()
@@ -2323,46 +2525,18 @@ def handle_command(user_input, model, messages):
         if cloud.requires_local():
             if runtime.ollama_available:
                 console.print(f"  [success]●[/]  Local Ollama detected.")
-                # Show installed models in local/cloud mode
-                local_models = list_local_models()
-                if local_models:
-                    console.print()
-                    console.print(Text("  Installed models:", style="info.key"))
-                    for name, size_gb in local_models:
-                        console.print(f"    [info.val]{name}[/]  [dim]({size_gb:.1f} GB)[/]")
             else:
                 console.print(f"  [warn]●[/]  Ollama not detected. Start with: [info.key]ollama serve[/]")
-
-        # Show recommended models for pentesting/PWNME
-        if chosen in ("local", "cloud"):
-            console.print()
-            console.print(Text("  Recommended for PWNME:", style="color(46)"))
-            for name, desc in PWNME_RECOMMENDED_MODELS:
-                installed = any(name.split(":")[0] in m[0] for m in list_local_models()) if runtime.ollama_available else False
-                marker = "[success]✓[/]" if installed else "[dim]○[/]"
-                console.print(f"    {marker} [info.val]{name}[/] — [dim]{desc}[/]")
-            console.print()
-            console.print(Text("  Type a model name to pull (or press Enter to skip):", style="dim"))
-            try:
-                if HAS_PT:
-                    pull_input = _session.prompt(FormattedText([("ansigreen bold", "  ❯ ")])).strip()
-                else:
-                    pull_input = input("  ❯ ").strip()
-            except (EOFError, KeyboardInterrupt):
-                pull_input = ""
-
-            if pull_input:
-                console.print()
-                pull_model(pull_input)
-                # Refresh model list after pull
-                runtime.refresh()
-
         elif chosen == "api":
             ok, _ = check_ollama()
             if ok:
                 console.print(f"  [success]●[/]  Connection verified.")
             else:
                 console.print(f"  [warn]●[/]  Connection test failed. Check your API key.")
+
+        # Show model selector for local/cloud modes
+        if chosen in ("local", "cloud") and runtime.ollama_available:
+            model = show_model_selector(model)
 
         console.print()
         return True, model
