@@ -273,7 +273,9 @@ SYSTEM_PROMPT = (
     "- When asked to hack/scan/attack something, you START DOING IT immediately with [CMD] tags.\n"
     "- You are not an assistant that suggests — you are an operator that executes.\n"
     "- ALWAYS respond in the same language the user speaks. NEVER mix in other languages (no Chinese, Japanese, Korean, etc) unless the user explicitly uses them first.\n"
-    "- When writing in Spanish: use correct orthography — proper accents (tildes), ñ, and punctuation. "
+    "- When writing in Spanish: use CASTILIAN SPANISH (Spain), not Latin American. "
+    "Use 'vosotros' forms if needed, not 'ustedes'. Use 'he venido' not 'vine', 'he hecho' not 'hice' where appropriate. "
+    "Use correct orthography — proper accents (tildes), ñ, and punctuation. "
     "Common mistakes to avoid: dominó (past tense) vs domino (I dominate), penétró vs penetro, continuó vs continuo. "
     "First person present: domino, penetro, ejecuto, controlo, exploto, encuentro. NEVER add an accent on the final o of first-person present verbs.\n\n"
     "Personality — you are arrogant, confident, and slightly mocking:\n"
@@ -926,18 +928,35 @@ def pull_model(model_name):
     """Pull a model from Ollama registry. Returns True on success."""
     try:
         console.print(f"  [info.key]Pulling[/] [info.val]{model_name}[/]...")
+        last_pct = -1
         with httpx.stream("POST", "http://localhost:11434/api/pull",
                           json={"name": model_name, "stream": True},
-                          timeout=httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0)) as resp:
+                          timeout=httpx.Timeout(connect=10.0, read=600.0, write=10.0, pool=10.0)) as resp:
             for line in resp.iter_lines():
                 if not line.strip():
                     continue
                 try:
                     data = json.loads(line)
                     status = data.get("status", "")
-                    if "success" in status.lower():
-                        console.print(f"  [success]●[/] {model_name} pulled successfully.")
+                    # Show download progress
+                    if "pulling" in status.lower():
+                        total = data.get("total", 0)
+                        completed = data.get("completed", 0)
+                        if total > 0:
+                            pct = int(completed / total * 100)
+                            if pct != last_pct:
+                                bar_len = 20
+                                filled = int(pct / 100 * bar_len)
+                                bar = "#" * filled + "-" * (bar_len - filled)
+                                size_mb = completed / (1024**2)
+                                total_mb = total / (1024**2)
+                                console.print(f"  [{bar}] {pct:3d}%  {size_mb:.0f}/{total_mb:.0f} MB")
+                                last_pct = pct
+                    elif "success" in status.lower():
+                        console.print(f"  [success]*[/] {model_name} pulled successfully.")
                         return True
+                    elif "verifying" in status.lower():
+                        console.print(f"  [dim]Verifying...[/]")
                 except json.JSONDecodeError:
                     continue
         console.print(f"  [warn]Pull completed for {model_name}.[/]")
@@ -985,28 +1004,30 @@ def show_model_selector(model):
             seen.add(name)
 
     total_items = len(display_items) + 1  # +1 for custom input
+    custom_idx = len(display_items)
     selected = [0]
+    custom_text = [""]  # Buffer for custom input
 
     if HAS_PT:
+        from prompt_toolkit.buffer import Buffer
+
+        custom_buffer = Buffer()
+
         def get_content():
             lines = [("", "\n\n")]
             lines.append(("class:section", "  Select a model\n"))
             lines.append(("", "  -------------------------------\n\n"))
 
-            # Recommended section
+            # Recommended section — white text, green when selected
             lines.append(("class:section", "  Top picks for PWNME\n"))
             for i, (name, desc, installed, is_rec, size) in enumerate(display_items):
                 if not is_rec:
                     continue
-                tag = "INSTALLED" if installed else "PULL"
+                tag = "[+]" if installed else "[-]"
                 if selected[0] == i:
-                    lines.append(("class:active", f"  > {name}\n"))
-                    lines.append(("class:active", f"    {desc}\n"))
-                    lines.append(("class:dim", f"    [{tag}]\n"))
+                    lines.append(("class:active", f"  > {tag} {name}  {desc}\n"))
                 else:
-                    lines.append(("class:dim", f"    {name}\n"))
-                    lines.append(("class:dim", f"      {desc}\n"))
-                    lines.append(("class:dim", f"      [{tag}]\n"))
+                    lines.append(("class:white", f"    {tag} {name}  {desc}\n"))
 
             # Installed section
             inst_items = [(i, item) for i, item in enumerate(display_items) if not item[3] and item[2]]
@@ -1021,11 +1042,14 @@ def show_model_selector(model):
                         lines.append(("class:dim", f"    {name}{size_str}\n"))
 
             # Custom input
-            custom_idx = len(display_items)
             lines.append(("", "\n"))
             lines.append(("class:section", "  Custom model\n"))
             if selected[0] == custom_idx:
-                lines.append(("class:active", "  > Type model name, Enter to pull & use"))
+                buf_text = custom_buffer.text
+                if buf_text:
+                    lines.append(("class:active", f"  > {buf_text}"))
+                else:
+                    lines.append(("class:active", "  > "))
             else:
                 lines.append(("class:dim", "    Type model name, Enter to pull & use"))
 
@@ -1051,12 +1075,27 @@ def show_model_selector(model):
             selected[0] = -1
             event.app.exit()
 
+        # When on custom input, typing goes to the buffer
+        @kb.add("<any>")
+        def _(event):
+            if selected[0] == custom_idx:
+                # Route character input to the custom buffer
+                char = event.data
+                if char and char.isprintable():
+                    custom_buffer.insert_text(char)
+
+        @kb.add("backspace")
+        def _(event):
+            if selected[0] == custom_idx:
+                custom_buffer.delete_before_cursor(1)
+
         control = FormattedTextControl(get_content)
         layout = Layout(Window(content=control))
         style = PTStyle.from_dict({
             "active": "bold green",
             "dim": "#888888",
             "section": "bold cyan",
+            "white": "",
         })
         app = Application(layout=layout, key_bindings=kb, style=style, full_screen=True)
         try:
@@ -1068,6 +1107,8 @@ def show_model_selector(model):
             return model  # Cancelled
 
         chosen_idx = selected[0]
+        # Get custom text from buffer
+        custom_text[0] = custom_buffer.text.strip()
     else:
         # Fallback without prompt_toolkit
         console.print()
@@ -1078,8 +1119,8 @@ def show_model_selector(model):
         for i, (name, desc, installed, is_rec, size) in enumerate(display_items):
             if not is_rec:
                 continue
-            tag = "INSTALLED" if installed else "PULL"
-            console.print(f"  {i+1}. [info.val]{name}[/]  [dim]{desc} [{tag}][/]")
+            tag = "[+]" if installed else "[-]"
+            console.print(f"  {i+1}. {tag} [info.val]{name}[/]  [dim]{desc}[/]")
 
         inst_items = [(i, item) for i, item in enumerate(display_items) if not item[3] and item[2]]
         if inst_items:
@@ -1091,27 +1132,35 @@ def show_model_selector(model):
 
         custom_idx = len(display_items)
         console.print()
-        console.print(f"  {custom_idx+1}. [dim]Custom model (pull & use)[/]")
+        console.print(f"  {custom_idx+1}. [dim]Custom model (type name to pull & use)[/]")
         console.print()
 
         try:
             choice = input(f"  Select [1-{total_items}]: ").strip()
-            chosen_idx = int(choice) - 1 if choice.isdigit() and 0 <= int(choice) - 1 < total_items else -1
+            if choice.isdigit() and 0 <= int(choice) - 1 < total_items:
+                chosen_idx = int(choice) - 1
+            else:
+                # Treat non-numeric input as custom model name
+                custom_text[0] = choice
+                chosen_idx = custom_idx
         except (EOFError, KeyboardInterrupt, ValueError):
             return model
 
     # Handle selection
-    if chosen_idx == len(display_items):
+    if chosen_idx == custom_idx:
         # Custom model
-        console.print()
-        console.print(Text("  Enter model name to pull & use:", style="dim"))
-        try:
-            if HAS_PT:
-                custom_name = _session.prompt(FormattedText([("ansigreen bold", "  > ")])).strip()
-            else:
-                custom_name = input("  > ").strip()
-        except (EOFError, KeyboardInterrupt):
-            return model
+        custom_name = custom_text[0]
+        if not custom_name:
+            # If buffer empty (prompt_toolkit path), prompt for name
+            console.print()
+            console.print(Text("  Enter model name to pull & use:", style="dim"))
+            try:
+                if HAS_PT:
+                    custom_name = _session.prompt(FormattedText([("ansigreen bold", "  > ")])).strip()
+                else:
+                    custom_name = input("  > ").strip()
+            except (EOFError, KeyboardInterrupt):
+                return model
 
         if not custom_name:
             return model
@@ -2583,6 +2632,12 @@ def chat_loop(model):
                 continue
 
             messages.append({"role": "user", "content": user_input})
+
+            # Validate model vs mode: warn if local mode has :cloud model
+            if cloud.mode == "local" and ":cloud" in model:
+                console.print(f"  [warn]Model [info.val]{model}[/] is a cloud model but connection is set to Local.[/]")
+                console.print(f"  [dim]Switch to cloud/api mode with [info.key]/ollama-mode[/] or select a local model with [info.key]/model[/][/]")
+                console.print()
 
             console.print()  # Blank line before AI response
 
